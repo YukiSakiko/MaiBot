@@ -2,6 +2,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import ContextManager, Generator, TYPE_CHECKING
 
+import threading
+
 from rich.traceback import install
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
@@ -27,6 +29,16 @@ _DB_FILE = _DB_DIR / "MaiBot.db"
 # 确保数据库目录存在
 _DB_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_URL = f"sqlite:///{_DB_FILE}"
+
+
+# 串行化所有 SQLite 写事务的进程级互斥锁。
+# 底层 SQLite WAL 仅允许单写，busy_timeout 仅 1s（见上方 PRAGMA），bot 进程同时存在
+# 多个 event loop（bot.py 主 loop、WebUI 在另一个线程的独立 loop、临时 asyncio.run 调用等），
+# 因此锁必须是进程级的 threading.Lock 而不是 asyncio.Lock；后者只能互斥同一个 loop 内的协程，
+# 跨 loop / 跨线程时形同虚设。
+# 所有走 `asyncio.to_thread` 把写入下放到线程池的 helper 都应该在 `with get_db_session()`
+# 外层套一层 `with DB_WRITE_THREAD_LOCK:`，避免多个写线程同时撞 SQLite busy_timeout。
+DB_WRITE_THREAD_LOCK = threading.Lock()
 
 
 @event.listens_for(Engine, "connect")

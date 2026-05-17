@@ -12,7 +12,6 @@ import random
 import re
 
 import asyncio
-import threading
 
 from src.common.data_models.message_component_data_model import (
     AtComponent,
@@ -27,6 +26,7 @@ from src.common.data_models.message_component_data_model import (
     UnknownUser,
     VoiceComponent,
 )
+from src.common.database.database import DB_WRITE_THREAD_LOCK
 from src.common.logger import get_logger
 from src.config.config import global_config
 
@@ -37,16 +37,6 @@ if TYPE_CHECKING:
     from src.chat.message_receive.message import SessionMessage
 
 logger = get_logger("message_utils")
-
-
-# 串行化 store_message_to_db / update_message_id 的 SQLite 写入：
-# 底层 SQLite WAL 仅允许单写，busy_timeout 1s。bot 进程不只一个 event loop
-# （bot.py 主 loop、WebUI 在另一个线程的独立 loop、临时 asyncio.run 调用等），
-# 因此 lock 必须是进程级的 threading.Lock 而不是 asyncio.Lock；后者只能互斥
-# 同一个 loop 内的协程，跨 loop / 跨线程时形同虚设。
-# 锁直接持有在同步方法本体里，所有调用路径（同步直调、async wrapper 经 to_thread、
-# 测试 / 迁移脚本直调）都被串行化，不存在绕过路径。
-_DB_WRITE_THREAD_LOCK = threading.Lock()
 
 
 class MessageUtils:
@@ -199,11 +189,11 @@ class MessageUtils:
         """存储消息到数据库，此方法没有update机制。
 
         加锁在同步方法本体，保证所有写入路径（包括同步直接调用与 async wrapper）
-        都被串行化，参见 `_DB_WRITE_THREAD_LOCK` 注释。
+        都被串行化，参见 `DB_WRITE_THREAD_LOCK` 注释。
         """
         from src.common.database.database import get_db_session
 
-        with _DB_WRITE_THREAD_LOCK:
+        with DB_WRITE_THREAD_LOCK:
             with get_db_session() as session:
                 MessageUtils._persist_image_components(message.raw_message.components, session)
                 db_message = message.to_db_instance()
@@ -315,7 +305,7 @@ class MessageUtils:
         from src.common.database.database import get_db_session
         from src.common.database.database_model import Messages
 
-        with _DB_WRITE_THREAD_LOCK:
+        with DB_WRITE_THREAD_LOCK:
             with get_db_session() as session:
                 existing_target = session.exec(
                     select(Messages).filter_by(message_id=normalized_new_message_id).limit(1)
